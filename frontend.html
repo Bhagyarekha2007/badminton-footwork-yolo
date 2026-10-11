@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Badminton Footwork Detector</title>
+<style>
+body{font-family:Arial;max-width:700px;margin:30px auto;padding:0 15px}
+button{padding:8px 16px;background:#2a7de1;color:#fff;border:0;border-radius:4px;cursor:pointer}
+td,th{padding:5px 10px;border-bottom:1px solid #ddd;text-align:left}
+.bar{background:#2a7de1;height:16px}
+</style>
+</head>
+<body>
+<h2>Badminton Footwork Zone Detector</h2>
+<input type="file" id="f" accept="video/*">
+<button onclick="go()">Analyze</button>
+<p id="msg"></p>
+<video id="v" controls width="300" style="display:none"></video>
+<div id="out"></div>
+
+<script>
+const msg = document.getElementById("msg");
+const v = document.getElementById("v");
+const out = document.getElementById("out");
+
+async function go() {
+  const file = document.getElementById("f").files[0];
+  if (!file) { msg.textContent = "Choose a video first"; return; }
+  v.src = URL.createObjectURL(file);
+  v.style.display = "block";
+  out.innerHTML = "";
+  msg.textContent = "Analyzing... this takes about a minute";
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const res = await fetch("http://127.0.0.1:8000/predict", { method: "POST", body: fd });
+    const d = await res.json();
+    const rows = d.results;
+    let changes = 0;
+    for (let i = 1; i < rows.length; i++) if (rows[i].zone !== rows[i-1].zone) changes++;
+    const avg = (rows.reduce((s, r) => s + r.confidence, 0) / rows.length).toFixed(2);
+    const secs = d.seconds_per_zone;
+    const max = Math.max(...Object.values(secs));
+    let h = "<h3>Results</h3><p>Frames: " + d.frames + " | Zone changes: " + changes +
+            " | Average confidence: " + avg + "</p><table><tr><th>Zone</th><th>Seconds</th><th></th></tr>";
+    for (const z in secs) {
+      h += "<tr><td>" + z + "</td><td>" + secs[z] + "</td><td style='width:250px'><div class='bar' style='width:" +
+           (secs[z] / max * 100) + "%'></div></td></tr>";
+    }
+    out.innerHTML = h + "</table>";
+    msg.textContent = "Done";
+  } catch (e) {
+    msg.textContent = "Error: is the backend running?";
+  }
+}
+</script>
+</body>
+</html>
