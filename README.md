@@ -1,38 +1,42 @@
-# Badminton Footwork Zone Detection (YOLOv8)
+# Badminton Footwork Zone Detector
 
-Detects the near badminton player in a behind-court video and classifies their
-court zone (6 footwork zones + Uncertain). Based on: "A Deep Learning Approach to
-Badminton Player Footwork Detection Based on YOLO Models" (ICSIPA 2024).
+Detects a badminton player in a match video and classifies which court footwork zone the player is in. A YOLOv8s model is trained on labeled match frames, and a FastAPI backend with a web page lets you upload a video and see the results.
 
-## Classes
-Forehand/Backhand x Front_Corner, Side, BackCourt_Corner, and Uncertain (7 total).
+## What the app gives you
+- Annotated video (box and zone name on the player)
+- Time spent in each zone and number of zone changes
+- CSV of the zone for every frame
 
-## Pipeline
-Videos -> frames (OpenCV) -> labeling (Roboflow) -> YOLOv8 training (Colab)
--> analysis -> FastAPI backend -> HTML frontend
+## Model
+- YOLOv8s, 100 epochs max (early stopping), image size 640
+- 7 classes: 6 court zones plus Uncertain
+- 1,365 labeled frames split by video (1080 train / 150 val / 135 test), so frames from one video never appear in two splits
 
-## Files
-- `best.pt` - trained YOLOv8n model
-- `analyze.py` - zone counts, time per zone, CSV and chart for a video
-- `backend.py` - FastAPI server (`POST /predict`)
-- `frontend.html` - upload page showing zone seconds and confidence
-- `scripts/` - frame extraction and helper scripts
-- `results/` - chart, CSV and sample prediction
+## Results (test set, 135 images)
+
+| Metric | Value |
+|---|---|
+| Precision | 0.803 |
+| Recall | 0.599 |
+| F1 | 0.69 |
+| mAP50 | 0.659 |
+| mAP50-95 | 0.402 |
+
+First version (234 frames, YOLOv8n): mAP50 0.578. The base paper reports mAP50 0.633 for YOLOv8 on its own dataset, so the numbers are not directly comparable.
+
+Limitations: the test set is small. Two corner zones have only 1 to 2 test examples, and two back-court zones are missing from it, so their per-zone scores are not reliable. Forehand_Side (89 images) and Uncertain (24) are the most reliable. More labeled examples of the rare corner zones are the main next step.
+
+
+
+![Confusion matrix](results/confusion_matrix.png)
+
+
 
 ## How to run
-1. `pip install ultralytics opencv-python fastapi uvicorn python-multipart matplotlib`
-2. Start the backend: `python -m uvicorn backend:app`
-3. Open `frontend.html` in a browser, choose a video, click Analyze.
 
-## Results
-- Test mAP50: 0.578 (YOLOv8n, 23 test frames). The base paper reports 0.633.
-- Demo video (5 joined clips, 237 frames): average confidence 0.60.
+    pip install fastapi uvicorn python-multipart ultralytics opencv-python imageio-ffmpeg
+    python -m uvicorn backend:app
 
-## Limitations
-- Small dataset, limited venues, one camera view (behind the court).
-- Right-handed singles players only.
-- Zone labels flicker between frames; smoothing and more data would help.
+Then open http://127.0.0.1:8000, choose a match video filmed from behind the court, and click Analyze video.
 
-## Dataset
-Videos from the Mendeley Data set "A Video-Based Frame-Level Dataset of Badminton
-Player Movements for Motion Analysis" (DOI 10.17632/3sp4xntp34.1).
+Files: backend.py (API), frontend.html (web page), best.pt (trained model), analyze.py and scripts/ (analysis and data tools).
