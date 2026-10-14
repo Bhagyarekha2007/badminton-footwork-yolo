@@ -1,57 +1,113 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Badminton Footwork Detector</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Badminton Footwork Analyzer</title>
 <style>
-body{font-family:Arial;max-width:700px;margin:30px auto;padding:0 15px}
-button{padding:8px 16px;background:#2a7de1;color:#fff;border:0;border-radius:4px;cursor:pointer}
-td,th{padding:5px 10px;border-bottom:1px solid #ddd;text-align:left}
-.bar{background:#2a7de1;height:16px}
+:root{--bg:#f3f6f4;--ink:#17261f;--muted:#5d6f66;--court:#1d5c45;--line:#d5ded9;--card:#fff;--warn:#b3261e}
+@media (prefers-color-scheme:dark){:root{--bg:#101a15;--ink:#e8f0eb;--muted:#9bb0a5;--court:#4fbf93;--line:#2a3c33;--card:#17241d;--warn:#ff8a80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Georgia,"Times New Roman",serif}
+main{max-width:860px;margin:0 auto;padding:28px 16px 60px}
+h1{font-size:1.9rem;margin:0 0 4px}
+.sub{color:var(--muted);margin:0 0 24px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px;margin-bottom:18px}
+.pick{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+input[type=file]{flex:1;min-width:200px;font:inherit}
+button{font:inherit;padding:9px 18px;border:0;border-radius:6px;background:var(--court);color:#fff;cursor:pointer}
+button:disabled{opacity:.5;cursor:wait}
+button.alt{background:transparent;color:var(--court);border:1px solid var(--court)}
+#msg{margin:12px 0 0;color:var(--muted)}
+#msg.err{color:var(--warn)}
+video{width:100%;max-height:480px;background:#000;border-radius:8px}
+.stats{display:flex;gap:28px;flex-wrap:wrap;margin:0 0 14px}
+.stats b{display:block;font-size:1.5rem}
+.stats span{color:var(--muted);font-size:.9rem}
+.row{display:grid;grid-template-columns:minmax(120px,210px) 1fr 64px;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}
+.track{height:14px;background:var(--line);border-radius:7px;overflow:hidden}
+.fill{height:100%}
+.val{text-align:right}
+.hide{display:none}
 </style>
 </head>
 <body>
-<h2>Badminton Footwork Zone Detector</h2>
-<input type="file" id="f" accept="video/*">
-<button onclick="go()">Analyze</button>
-<p id="msg"></p>
-<video id="v" controls width="300" style="display:none"></video>
-<div id="out"></div>
-
+<main>
+  <h1>Badminton footwork analyzer</h1>
+  <p class="sub">Upload a singles clip filmed from behind the court. You get the annotated video, time spent in each zone, and a CSV.</p>
+  <div class="card">
+    <div class="pick">
+      <input type="file" id="f" accept="video/*" aria-label="Choose a video">
+      <button id="go" onclick="go()">Analyze video</button>
+    </div>
+    <p id="msg" role="status"></p>
+  </div>
+  <div id="res" class="hide">
+    <div class="card"><video id="v" controls playsinline></video></div>
+    <div class="card">
+      <div class="stats" id="stats"></div>
+      <div id="chart"></div>
+      <p><button class="alt" onclick="dl()">Download CSV</button></p>
+    </div>
+  </div>
+</main>
 <script>
-const msg = document.getElementById("msg");
-const v = document.getElementById("v");
-const out = document.getElementById("out");
-
-async function go() {
-  const file = document.getElementById("f").files[0];
-  if (!file) { msg.textContent = "Choose a video first"; return; }
-  v.src = URL.createObjectURL(file);
-  v.style.display = "block";
-  out.innerHTML = "";
-  msg.textContent = "Analyzing... this takes about a minute";
+const API = location.protocol === "file:" ? "http://127.0.0.1:8000" : "";
+const COLORS = ["#1d5c45","#c2571a","#2b6cb0","#8a4fa0","#b8860b","#0f8a8a","#a33a3a","#6b7280"];
+const $ = id => document.getElementById(id);
+let lastRows = [];
+function say(t, err){ $("msg").textContent = t; $("msg").className = err ? "err" : ""; }
+async function go(){
+  const file = $("f").files[0];
+  if(!file){ say("Choose a video first.", true); return; }
+  $("go").disabled = true;
+  $("res").classList.add("hide");
+  say("Analyzing. A 30 second clip can take a few minutes, so keep this tab open.");
   const fd = new FormData();
   fd.append("file", file);
-  try {
-    const res = await fetch("http://127.0.0.1:8000/predict", { method: "POST", body: fd });
-    const d = await res.json();
-    const rows = d.results;
-    let changes = 0;
-    for (let i = 1; i < rows.length; i++) if (rows[i].zone !== rows[i-1].zone) changes++;
-    const avg = (rows.reduce((s, r) => s + r.confidence, 0) / rows.length).toFixed(2);
-    const secs = d.seconds_per_zone;
-    const max = Math.max(...Object.values(secs));
-    let h = "<h3>Results</h3><p>Frames: " + d.frames + " | Zone changes: " + changes +
-            " | Average confidence: " + avg + "</p><table><tr><th>Zone</th><th>Seconds</th><th></th></tr>";
-    for (const z in secs) {
-      h += "<tr><td>" + z + "</td><td>" + secs[z] + "</td><td style='width:250px'><div class='bar' style='width:" +
-           (secs[z] / max * 100) + "%'></div></td></tr>";
+  try{
+    const res = await fetch(API + "/predict", {method:"POST", body:fd});
+    if(!res.ok){
+      let detail = "The server could not process this video.";
+      try{ detail = (await res.json()).detail || detail; }catch(_){}
+      throw new Error(detail);
     }
-    out.innerHTML = h + "</table>";
-    msg.textContent = "Done";
-  } catch (e) {
-    msg.textContent = "Error: is the backend running?";
+    show(await res.json());
+    say("Done.");
+  }catch(e){
+    say(e.message === "Failed to fetch"
+      ? "Cannot reach the backend. Start it with: uvicorn backend:app" : e.message, true);
   }
+  $("go").disabled = false;
+}
+function show(d){
+  lastRows = d.results;
+  const rows = d.results;
+  let changes = 0;
+  for(let i = 1; i < rows.length; i++) if(rows[i].zone !== rows[i-1].zone) changes++;
+  const seen = rows.filter(r => r.zone !== "No player");
+  const avg = seen.length ? (seen.reduce((s,r) => s + r.confidence, 0) / seen.length).toFixed(2) : "0.00";
+  $("v").src = API + d.video_url;
+  $("stats").innerHTML =
+    `<div><b>${d.frames}</b><span>frames</span></div>` +
+    `<div><b>${changes}</b><span>zone changes</span></div>` +
+    `<div><b>${avg}</b><span>average confidence</span></div>`;
+  const secs = d.seconds_per_zone;
+  const names = Object.keys(secs).sort((a,b) => secs[b] - secs[a]);
+  const max = Math.max(...Object.values(secs), 1);
+  $("chart").innerHTML = names.map((z,i) =>
+    `<div class="row"><span>${z}</span>` +
+    `<div class="track"><div class="fill" style="width:${secs[z]/max*100}%;background:${COLORS[i % COLORS.length]}"></div></div>` +
+    `<span class="val">${secs[z]} s</span></div>`).join("");
+  $("res").classList.remove("hide");
+}
+function dl(){
+  const csv = "frame,second,zone,confidence\n" +
+    lastRows.map(r => [r.frame, r.second, '"' + r.zone + '"', r.confidence].join(",")).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
+  a.download = "zones.csv";
+  a.click();
 }
 </script>
 </body>
