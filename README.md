@@ -20,7 +20,7 @@ Lower than the paper (0.633) and my first model (0.578). The data and splits dif
 
 
 
-![App result](results/app_screenshot.jpg)
+![App result](results/app_screenshot.png)
 
 
 
