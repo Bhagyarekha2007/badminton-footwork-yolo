@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Badminton Footwork Analyzer</title>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js"></script>
+<style>
+:root{--bg:#f3f6f4;--ink:#17261f;--muted:#5d6f66;--court:#1d5c45;--line:#d5ded9;--card:#fff;--warn:#b3261e}
+@media (prefers-color-scheme:dark){:root{--bg:#101a15;--ink:#e8f0eb;--muted:#9bb0a5;--court:#4fbf93;--line:#2a3c33;--card:#17241d;--warn:#ff8a80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Georgia,"Times New Roman",serif}
+main{max-width:860px;margin:0 auto;padding:28px 16px 60px}
+h1{font-size:1.9rem;margin:0 0 4px}
+.sub{color:var(--muted);margin:0 0 24px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px;margin-bottom:18px}
+.pick{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+input[type=file]{flex:1;min-width:200px;font:inherit}
+button{font:inherit;padding:9px 18px;border:0;border-radius:6px;background:var(--court);color:#fff;cursor:pointer}
+button:disabled{opacity:.5;cursor:wait}
+button.alt{background:transparent;color:var(--court);border:1px solid var(--court)}
+#msg{margin:12px 0 0;color:var(--muted)}
+#msg.err{color:var(--warn)}
+.wrap{position:relative;display:inline-block;max-width:100%}
+.wrap video{display:block;max-width:100%;max-height:70vh;border-radius:8px;background:#000}
+.wrap canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.stats{display:flex;gap:28px;flex-wrap:wrap;margin:0 0 14px}
+.stats b{display:block;font-size:1.5rem}
+.stats span{color:var(--muted);font-size:.9rem}
+.row{display:grid;grid-template-columns:minmax(120px,210px) 1fr 64px;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}
+.track{height:14px;background:var(--line);border-radius:7px;overflow:hidden}
+.fill{height:100%}
+.val{text-align:right}
+.hide{display:none}
+</style>
+</head>
+<body>
+<main>
+  <h1>Badminton footwork analyzer</h1>
+  <p class="sub">Choose a singles clip filmed from behind the court. The analysis runs on your own device, so your video is never uploaded anywhere.</p>
+  <div class="card">
+    <div class="pick">
+      <input type="file" id="f" accept="video/*" aria-label="Choose a video">
+      <button id="go" onclick="go()" disabled>Analyze video</button>
+    </div>
+    <p id="msg" role="status"></p>
+  </div>
+  <div class="card hide" id="vcard"><div class="wrap"><video id="v" controls playsinline muted></video><canvas id="ov"></canvas></div></div>
+  <div class="card hide" id="res">
+    <div class="stats" id="stats"></div>
+    <div id="chart"></div>
+    <p><button class="alt" onclick="dl()">Download CSV</button></p>
+  </div>
+</main>
+<script>
+const SIZE = 640, CONF = 0.25, IOU = 0.7, SMOOTH = 5;
+const COLORS = ["#1d5c45","#c2571a","#2b6cb0","#8a4fa0","#b8860b","#0f8a8a","#a33a3a","#6b7280"];
+const $ = id => document.getElementById(id);
+let session = null, names = [], det = [], rows = [], stepSec = 0.1;
+const pc = document.createElement("canvas");
+pc.width = pc.height = SIZE;
+const pctx = pc.getContext("2d", {willReadFrequently: true});
+
+function say(t, err){ $("msg").textContent = t; $("msg").className = err ? "err" : ""; }
+
+async function loadModel(){
+  if(typeof ort === "undefined"){ say("Could not load the analysis library. Check your internet and reload.", true); return; }
+  ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
+  ort.env.wasm.numThreads = 1;
+  say("Loading the model (about 45 MB, first visit only)...");
+  try{
+    const r = await fetch("names.json");
+    if(!r.ok) throw new Error("names.json not found");
+    names = await r.json();
+    session = await ort.InferenceSession.create("best.onnx", {executionProviders: ["wasm"]});
+    $("go").disabled = false;
+    say("Model ready. Choose a video.");
+  }catch(e){ say("Could not load the model: " + e.message, true); }
+}
+
+function seek(v, t){
+  return new Promise(res => {
+    const done = () => { v.removeEventListener("seeked", done); res(); };
+    v.addEventListener("seeked", done);
+    v.currentTime = t;
+  });
+}
+
+function preprocess(v){
+  const w = v.videoWidth, h = v.videoHeight;
+  const r = Math.min(SIZE / w, SIZE / h);
+  const nw = Math.round(w * r), nh = Math.round(h * r);
+  const px = Math.floor((SIZE - nw) / 2), py = Math.floor((SIZE - nh) / 2);
+  pctx.fillStyle = "rgb(114,114,114)";
+  pctx.fillRect(0, 0, SIZE, SIZE);
+  pctx.drawImage(v, px, py, nw, nh);
+  const d = pctx.getImageData(0, 0, SIZE, SIZE).data;
+  const a = SIZE * SIZE, f = new Float32Array(3 * a);
+  for(let i = 0; i < a; i++){ f[i] = d[4*i] / 255; f[a+i] = d[4*i+1] / 255; f[2*a+i] = d[4*i+2] / 255; }
+  return {tensor: new ort.Tensor("float32", f, [1, 3, SIZE, SIZE]), r, px, py};
+}
+
+function iou(a, b){
+  const x1 = Math.max(a[0], b[0]), y1 = Math.max(a[1], b[1]), x2 = Math.min(a[2], b[2]), y2 = Math.min(a[3], b[3]);
+  const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  return inter / ((a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter + 1e-9);
+}
+
+function decode(out, pre){
+  const dims = out.dims, data = out.data;
+  const first = dims[1] < dims[2];
+  const C = first ? dims[1] : dims[2], N = first ? dims[2] : dims[1];
+  const g = (i, c) => first ? data[c*N + i] : data[i*C + c];
+  const nc = C - 4, cand = [];
+  for(let i = 0; i < N; i++){
+    let best = 0, k = 0;
+    for(let c = 0; c < nc; c++){ const s = g(i, 4 + c); if(s > best){ best = s; k = c; } }
+    if(best < CONF) continue;
+    const cx = g(i,0), cy = g(i,1), w = g(i,2), h = g(i,3);
+    cand.push({b: [(cx-w/2-pre.px)/pre.r, (cy-h/2-pre.py)/pre.r, (cx+w/2-pre.px)/pre.r, (cy+h/2-pre.py)/pre.r], s: best, k});
+  }
+  cand.sort((a, b) => b.s - a.s);
+  const keep = [];
+  for(const c of cand){ if(keep.every(q => iou(q.b, c.b) < IOU)) keep.push(c); }
+  if(!keep.length) return null;
+  let big = keep[0], ba = 0;
+  for(const c of keep){ const ar = (c.b[2]-c.b[0])*(c.b[3]-c.b[1]); if(ar > ba){ ba = ar; big = c; } }
+  return big;
+}
+
+async function go(){
+  const file = $("f").files[0];
+  if(!file){ say("Choose a video first.", true); return; }
+  $("go").disabled = true;
+  $("res").classList.add("hide");
+  $("vcard").classList.remove("hide");
+  det = []; rows = [];
+  const v = $("v");
+  v.src = URL.createObjectURL(file);
+  try{
+    await new Promise((ok, bad) => { v.onloadeddata = ok; v.onerror = () => bad(new Error("This video could not be read.")); });
+    const dur = v.duration;
+    stepSec = Math.max(0.1, dur / 300);
+    const n = Math.floor((dur - 0.05) / stepSec);
+    if(n < 1) throw new Error("This video is too short.");
+    for(let i = 0; i < n; i++){
+      await seek(v, stepSec * (i + 0.5));
+      const pre = preprocess(v);
+      const res = await session.run({[session.inputNames[0]]: pre.tensor});
+      det.push(decode(res[session.outputNames[0]], pre));
+      say("Analyzing " + (i + 1) + " of " + n + " ...");
+      await new Promise(r => setTimeout(r, 0));
+    }
+    show();
+    v.currentTime = 0;
+    say("Done. Press play to see the zone on the video.");
+  }catch(e){ say("Error: " + e.message, true); }
+  $("go").disabled = false;
+}
+
+function show(){
+  const raw = det.map(d => d ? names[d.k] : "No player");
+  const half = Math.floor(SMOOTH / 2);
+  const zones = raw.map((_, i) => {
+    const c = {};
+    raw.slice(Math.max(0, i - half), i + half + 1).forEach(z => c[z] = (c[z] || 0) + 1);
+    return Object.keys(c).sort((a, b) => c[b] - c[a])[0];
+  });
+  rows = zones.map((z, i) => ({time: +(stepSec * (i + 0.5)).toFixed(2), zone: z, conf: det[i] ? +det[i].s.toFixed(2) : 0}));
+  let changes = 0;
+  for(let i = 1; i < zones.length; i++) if(zones[i] !== zones[i-1]) changes++;
+  const seen = det.filter(Boolean);
+  const avg = seen.length ? (seen.reduce((s, d) => s + d.s, 0) / seen.length).toFixed(2) : "0.00";
+  const secs = {};
+  zones.forEach(z => secs[z] = (secs[z] || 0) + stepSec);
+  const keys = Object.keys(secs).sort((a, b) => secs[b] - secs[a]);
+  const max = Math.max(...Object.values(secs), 0.1);
+  $("stats").innerHTML =
+    "<div><b>" + zones.length + "</b><span>frames analyzed</span></div>" +
+    "<div><b>" + changes + "</b><span>zone changes</span></div>" +
+    "<div><b>" + avg + "</b><span>average confidence</span></div>";
+  $("chart").innerHTML = keys.map((z, i) =>
+    '<div class="row"><span>' + z + '</span><div class="track"><div class="fill" style="width:' +
+    (secs[z] / max * 100) + '%;background:' + COLORS[i % COLORS.length] + '"></div></div><span class="val">' +
+    secs[z].toFixed(1) + ' s</span></div>').join("");
+  $("res").classList.remove("hide");
+}
+
+const ov = $("ov"), ctx = ov.getContext("2d");
+function draw(){
+  const v = $("v");
+  if(v.videoWidth && det.length && rows.length){
+    if(ov.width !== v.videoWidth){ ov.width = v.videoWidth; ov.height = v.videoHeight; }
+    ctx.clearRect(0, 0, ov.width, ov.height);
+    const i = Math.min(det.length - 1, Math.max(0, Math.floor(v.currentTime / stepSec)));
+    const d = det[i];
+    if(d){
+      const [x1, y1, x2, y2] = d.b;
+      ctx.lineWidth = Math.max(2, ov.width / 300);
+      ctx.strokeStyle = "#2fd39a";
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      const fs = Math.max(14, ov.width / 28);
+      ctx.font = "bold " + fs + "px sans-serif";
+      const label = rows[i].zone + " " + d.s.toFixed(2);
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = "#2fd39a";
+      ctx.fillRect(x1, Math.max(0, y1 - fs - 6), tw + 10, fs + 6);
+      ctx.fillStyle = "#000";
+      ctx.fillText(label, x1 + 5, Math.max(fs, y1 - 6));
+    }
+  }
+  requestAnimationFrame(draw);
+}
+
+function dl(){
+  const csv = "time_seconds,zone,confidence\n" + rows.map(r => [r.time, '"' + r.zone + '"', r.conf].join(",")).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], {type: "text/csv"}));
+  a.download = "zones.csv";
+  a.click();
+}
+
+requestAnimationFrame(draw);
+loadModel();
+</script>
+</body>
+</html>
