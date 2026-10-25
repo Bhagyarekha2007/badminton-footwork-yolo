@@ -15,6 +15,12 @@ Corner classes had only 1 to 6 test boxes, so their AP50 is unreliable.
 
 Lower than the paper (0.633) and my first model (0.578). The data and splits differ, so this is not like-for-like. The main cause is too few corner-zone examples.
 
+
+##Title
+ 
+Live demo: https://bhagyarekha2007.github.io/badminton-footwork-yolo/
+
+
 ## Demo
 9 s clip: 237 frames, 13 zone changes, average confidence 0.59.
 
