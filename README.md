@@ -52,10 +52,3 @@ Live demo: https://bhagyarekha2007.github.io/badminton-footwork-yolo/
 
 
 
-## Limitations
-- Labels began as predictions from an earlier model
-- Corner zones had few examples
-- Small, imbalanced test set
-
-## Next step
-Label more corner frames from the 3,052 extracted frames and retrain.
